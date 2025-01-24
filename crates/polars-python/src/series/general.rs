@@ -1,5 +1,3 @@
-use std::io::Cursor;
-
 use polars_core::chunked_array::cast::CastOptions;
 use polars_core::series::IsSorted;
 use polars_core::utils::flatten::flatten_series;
@@ -7,14 +5,14 @@ use polars_row::RowEncodingOptions;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use pyo3::Python;
+use pyo3::{IntoPyObjectExt, Python};
 
-use self::row_encode::get_row_encoding_dictionary;
+use self::row_encode::get_row_encoding_context;
 use super::PySeries;
 use crate::dataframe::PyDataFrame;
 use crate::error::PyPolarsErr;
 use crate::prelude::*;
-use crate::py_modules::POLARS;
+use crate::py_modules::polars;
 
 #[pymethods]
 impl PySeries {
@@ -68,15 +66,13 @@ impl PySeries {
     }
 
     #[cfg(feature = "object")]
-    fn get_object(&self, index: usize) -> PyObject {
-        Python::with_gil(|py| {
-            if matches!(self.series.dtype(), DataType::Object(_, _)) {
-                let obj: Option<&ObjectValue> = self.series.get_object(index).map(|any| any.into());
-                obj.to_object(py)
-            } else {
-                py.None()
-            }
-        })
+    fn get_object<'py>(&self, py: Python<'py>, index: usize) -> PyResult<Bound<'py, PyAny>> {
+        if matches!(self.series.dtype(), DataType::Object(_, _)) {
+            let obj: Option<&ObjectValue> = self.series.get_object(index).map(|any| any.into());
+            Ok(obj.into_pyobject(py)?)
+        } else {
+            Ok(py.None().into_bound(py))
+        }
     }
 
     #[cfg(feature = "dtype-array")]
@@ -135,20 +131,13 @@ impl PySeries {
             Err(e) => return Err(PyPolarsErr::from(e).into()),
         };
 
-        let out = match av {
+        match av {
             AnyValue::List(s) | AnyValue::Array(s, _) => {
                 let pyseries = PySeries::new(s);
-                let out = POLARS
-                    .getattr(py, "wrap_s")
-                    .unwrap()
-                    .call1(py, (pyseries,))
-                    .unwrap();
-                out.into_py(py)
+                polars(py).getattr(py, "wrap_s")?.call1(py, (pyseries,))
             },
-            _ => Wrap(av).into_py(py),
-        };
-
-        Ok(out)
+            _ => Wrap(av).into_py_any(py),
+        }
     }
 
     /// Get a value by index, allowing negative indices.
@@ -200,8 +189,8 @@ impl PySeries {
         self.series.rename(name.into());
     }
 
-    fn dtype(&self, py: Python) -> PyObject {
-        Wrap(self.series.dtype().clone()).to_object(py)
+    fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Wrap(self.series.dtype().clone()).into_pyobject(py)
     }
 
     fn set_sorted_flag(&self, descending: bool) -> Self {
@@ -374,14 +363,14 @@ impl PySeries {
         py.allow_threads(|| self.series.shrink_to_fit());
     }
 
-    fn dot(&self, other: &PySeries, py: Python) -> PyResult<PyObject> {
+    fn dot<'py>(&self, other: &PySeries, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let lhs_dtype = self.series.dtype();
         let rhs_dtype = other.series.dtype();
 
-        if !lhs_dtype.is_numeric() {
+        if !lhs_dtype.is_primitive_numeric() {
             return Err(PyPolarsErr::from(polars_err!(opq = dot, lhs_dtype)).into());
         };
-        if !rhs_dtype.is_numeric() {
+        if !rhs_dtype.is_primitive_numeric() {
             return Err(PyPolarsErr::from(polars_err!(opq = dot, rhs_dtype)).into());
         }
 
@@ -395,44 +384,27 @@ impl PySeries {
                 .into()
         };
 
-        Ok(Wrap(result).into_py(py))
+        Wrap(result).into_pyobject(py)
     }
 
-    #[cfg(feature = "ipc_streaming")]
-    fn __getstate__(&self, py: Python) -> PyResult<PyObject> {
+    fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         // Used in pickle/pickling
-        let mut buf: Vec<u8> = vec![];
-        // IPC only support DataFrames so we need to convert it
-        let mut df = self.series.clone().into_frame();
-        IpcStreamWriter::new(&mut buf)
-            .with_compat_level(CompatLevel::newest())
-            .finish(&mut df)
-            .expect("ipc writer");
-        Ok(PyBytes::new_bound(py, &buf).to_object(py))
+        Ok(PyBytes::new(
+            py,
+            &py.allow_threads(|| self.series.serialize_to_bytes().map_err(PyPolarsErr::from))?,
+        ))
     }
 
-    #[cfg(feature = "ipc_streaming")]
     fn __setstate__(&mut self, py: Python, state: PyObject) -> PyResult<()> {
         // Used in pickle/pickling
 
         use pyo3::pybacked::PyBackedBytes;
         match state.extract::<PyBackedBytes>(py) {
-            Ok(s) => {
-                let c = Cursor::new(&s);
-                let reader = IpcStreamReader::new(c);
-                let mut df = reader.finish().map_err(PyPolarsErr::from)?;
-
-                df.pop()
-                    .map(|s| {
-                        self.series = s.take_materialized_series();
-                    })
-                    .ok_or_else(|| {
-                        PyPolarsErr::from(PolarsError::NoData(
-                            "No columns found in IPC byte stream".into(),
-                        ))
-                        .into()
-                    })
-            },
+            Ok(s) => py.allow_threads(|| {
+                let s = Series::deserialize_from_reader(&mut &*s).map_err(PyPolarsErr::from)?;
+                self.series = s;
+                Ok(())
+            }),
             Err(e) => Err(e),
         }
     }
@@ -474,7 +446,7 @@ impl PySeries {
 
     fn get_chunks(&self) -> PyResult<Vec<PyObject>> {
         Python::with_gil(|py| {
-            let wrap_s = py_modules::POLARS.getattr(py, "wrap_s").unwrap();
+            let wrap_s = py_modules::polars(py).getattr(py, "wrap_s").unwrap();
             flatten_series(&self.series)
                 .into_iter()
                 .map(|s| wrap_s.call1(py, (Self::new(s),)))
@@ -569,7 +541,7 @@ impl PySeries {
 
             let dicts = dtypes
                 .iter()
-                .map(|(_, dtype)| get_row_encoding_dictionary(&dtype.0))
+                .map(|(_, dtype)| get_row_encoding_context(&dtype.0))
                 .collect::<Vec<_>>();
 
             // Get the BinaryOffset array.
@@ -591,17 +563,17 @@ impl PySeries {
             let columns = columns
                 .into_iter()
                 .zip(dtypes)
-                .map(|(arr, (name, dtype))| {
-                    unsafe {
-                        Series::from_chunks_and_dtype_unchecked(
-                            PlSmallStr::from(name),
-                            vec![arr],
-                            &dtype.0,
-                        )
-                    }
+                .map(|(arr, (name, dtype))| unsafe {
+                    Series::from_chunks_and_dtype_unchecked(
+                        PlSmallStr::from(name),
+                        vec![arr],
+                        &dtype.0.to_physical(),
+                    )
                     .into_column()
+                    .from_physical_unchecked(&dtype.0)
                 })
-                .collect::<Vec<_>>();
+                .collect::<PolarsResult<Vec<_>>>()
+                .map_err(PyPolarsErr::from)?;
             Ok(DataFrame::new(columns).map_err(PyPolarsErr::from)?.into())
         })
     }

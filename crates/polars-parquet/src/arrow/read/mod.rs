@@ -17,7 +17,6 @@ use futures::{AsyncRead, AsyncSeek};
 use polars_error::PolarsResult;
 pub use schema::{infer_schema, FileMetadata};
 
-use crate::parquet::error::ParquetResult;
 #[cfg(feature = "async")]
 pub use crate::parquet::read::{get_page_stream, read_metadata_async as _read_metadata_async};
 // re-exports of crate::parquet's relevant APIs
@@ -64,6 +63,10 @@ pub async fn read_metadata_async<R: AsyncRead + AsyncSeek + Send + Unpin>(
     reader: &mut R,
 ) -> PolarsResult<FileMetadata> {
     Ok(_read_metadata_async(reader).await?)
+}
+
+fn convert_year_month(value: &[u8]) -> i32 {
+    i32::from_le_bytes(value[..4].try_into().unwrap())
 }
 
 fn convert_days_ms(value: &[u8]) -> arrow::types::days_ms {

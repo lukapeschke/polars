@@ -24,7 +24,9 @@ mod inner {
             }
         }
 
-        pub fn nodes_scratch_mut(&mut self) -> &mut UnitVec<Node> {
+        /// Returns shared scratch space after clearing.
+        pub fn empty_nodes_scratch_mut(&mut self) -> &mut UnitVec<Node> {
+            self.scratch.clear();
             &mut self.scratch
         }
     }
@@ -49,7 +51,7 @@ fn can_pushdown_slice_past_projections(
     arena: &Arena<AExpr>,
     scratch: &mut UnitVec<Node>,
 ) -> (bool, bool) {
-    assert!(scratch.is_empty());
+    scratch.clear();
 
     let mut can_pushdown_and_any_expr_has_column = false;
 
@@ -63,7 +65,7 @@ fn can_pushdown_slice_past_projections(
         //
         // TODO: Simply checking that a column node is present does not handle e.g.:
         // `select(c = Literal([1, 2, 3]).is_in(col(a)))`, for functions like `is_in`,
-        // `str.contains`, `str.contains_many` etc. - observe a column node is present
+        // `str.contains`, `str.contains_any` etc. - observe a column node is present
         // but the output height is not dependent on it.
         let mut has_column = false;
         let mut literals_all_scalar = true;
@@ -76,7 +78,7 @@ fn can_pushdown_slice_past_projections(
 
             match ae {
                 AExpr::Column(_) => has_column = true,
-                AExpr::Literal(v) => literals_all_scalar &= v.projects_as_scalar(),
+                AExpr::Literal(v) => literals_all_scalar &= v.is_scalar(),
                 _ => {},
             }
 
@@ -316,13 +318,12 @@ impl SlicePushDown {
 
                 Ok(lp)
             },
-            (DataFrameScan {df, schema, output_schema, filter, }, Some(state)) if filter.is_none() => {
+            (DataFrameScan {df, schema, output_schema, }, Some(state))  => {
                 let df = df.slice(state.offset, state.len as usize);
                 let lp = DataFrameScan {
                     df: Arc::new(df),
                     schema,
                     output_schema,
-                    filter
                 };
                 Ok(lp)
             }
@@ -353,7 +354,7 @@ impl SlicePushDown {
                 left_on,
                 right_on,
                 mut options
-            }, Some(state)) if !self.streaming => {
+            }, Some(state)) if !self.streaming && !matches!(options.options, Some(JoinTypeOptionsIR::Cross { .. })) => {
                 // first restart optimization in both inputs and get the updated LP
                 let lp_left = lp_arena.take(input_left);
                 let lp_left = self.pushdown(lp_left, None, lp_arena, expr_arena)?;
@@ -494,15 +495,16 @@ impl SlicePushDown {
             // [Pushdown]
             // these nodes will be pushed down.
             // State is None, we can continue
-            m @(Select {..}, None) |
-            m @ (SimpleProjection {..}, _)
+            m @ (Select {..}, None)
+            | m @ (HStack {..}, None)
+            | m @ (SimpleProjection {..}, _)
             => {
                 let (lp, state) = m;
                 self.pushdown_and_continue(lp, state, lp_arena, expr_arena)
             }
             // there is state, inspect the projection to determine how to deal with it
             (Select {input, expr, schema, options}, Some(_)) => {
-                if can_pushdown_slice_past_projections(&expr, expr_arena, self.nodes_scratch_mut()).1 {
+                if can_pushdown_slice_past_projections(&expr, expr_arena, self.empty_nodes_scratch_mut()).1 {
                     let lp = Select {input, expr, schema, options};
                     self.pushdown_and_continue(lp, state, lp_arena, expr_arena)
                 }
@@ -513,7 +515,7 @@ impl SlicePushDown {
                 }
             }
             (HStack {input, exprs, schema, options}, _) => {
-                let (can_pushdown, can_pushdown_and_any_expr_has_column) = can_pushdown_slice_past_projections(&exprs, expr_arena, self.nodes_scratch_mut());
+                let (can_pushdown, can_pushdown_and_any_expr_has_column) = can_pushdown_slice_past_projections(&exprs, expr_arena, self.empty_nodes_scratch_mut());
 
                 if can_pushdown_and_any_expr_has_column || (
                     // If the schema length is greater then an input column is being projected, so

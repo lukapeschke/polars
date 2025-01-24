@@ -59,7 +59,7 @@ pub struct IpcSourceNodeConfig {
     rechunk: bool,
     include_file_paths: Option<PlSmallStr>,
 
-    first_metadata: FileMetadata,
+    first_metadata: Arc<FileMetadata>,
 }
 
 pub struct IpcSourceNodeState {
@@ -91,7 +91,7 @@ impl IpcSourceNode {
         options: IpcScanOptions,
         _cloud_options: Option<CloudOptions>,
         file_options: FileScanOptions,
-        mut first_metadata: Option<FileMetadata>,
+        mut first_metadata: Option<Arc<FileMetadata>>,
     ) -> PolarsResult<Self> {
         // These should have all been removed during lower_ir
         assert!(predicate.is_none());
@@ -117,7 +117,7 @@ impl IpcSourceNode {
             None => {
                 let source = sources.iter().next().unwrap();
                 let source = source.to_memslice()?;
-                read_file_metadata(&mut std::io::Cursor::new(&*source))?
+                Arc::new(read_file_metadata(&mut std::io::Cursor::new(&*source))?)
             },
         };
 
@@ -291,7 +291,7 @@ impl ComputeNode for IpcSourceNode {
                     let schema = projection_info.as_ref().map_or(config.first_metadata.schema.as_ref(), |ProjectionInfo { schema, .. }| schema);
                     let pl_schema = schema
                         .iter()
-                        .map(|(n, f)| (n.clone(), DataType::from_arrow(&f.dtype, true)))
+                        .map(|(n, f)| (n.clone(), DataType::from_arrow_field(f)))
                         .collect();
 
                     while let Ok(m) = rx.recv().await {
@@ -412,13 +412,15 @@ impl ComputeNode for IpcSourceNode {
                         let metadata = if state.source_idx == 0 {
                             config.first_metadata.clone()
                         } else {
-                            read_file_metadata(&mut std::io::Cursor::new(memslice.as_ref()))?
+                            Arc::new(read_file_metadata(&mut std::io::Cursor::new(
+                                memslice.as_ref(),
+                            ))?)
                         };
 
                         state.source.insert(Source {
                             file_path,
                             memslice: Arc::new(memslice),
-                            metadata: Arc::new(metadata),
+                            metadata,
                             block_offset: 0,
                         })
                     },

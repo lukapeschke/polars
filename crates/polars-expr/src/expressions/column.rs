@@ -133,6 +133,7 @@ impl PhysicalExpr for ColumnExpr {
     fn as_expression(&self) -> Option<&Expr> {
         Some(&self.expr)
     }
+
     fn evaluate(&self, df: &DataFrame, state: &ExecutionState) -> PolarsResult<Column> {
         let out = match self.schema.get_full(&self.name) {
             Some((idx, _, _)) => {
@@ -155,19 +156,19 @@ impl PhysicalExpr for ColumnExpr {
             // in debug builds we panic so that it can be fixed when occurring
             None => {
                 if self.name.starts_with(CSE_REPLACED) {
-                    return self.process_cse(df, &self.schema).map(Column::from);
+                    return self.process_cse(df, &self.schema);
                 }
                 self.process_by_linear_search(df, state, true)
             },
         };
-        self.check_external_context(out, state).map(Column::from)
+        self.check_external_context(out, state)
     }
 
     #[allow(clippy::ptr_arg)]
     fn evaluate_on_groups<'a>(
         &self,
         df: &DataFrame,
-        groups: &'a GroupsProxy,
+        groups: &'a GroupPositions,
         state: &ExecutionState,
     ) -> PolarsResult<AggregationContext<'a>> {
         let c = self.evaluate(df, state)?;
@@ -176,6 +177,10 @@ impl PhysicalExpr for ColumnExpr {
 
     fn as_partitioned_aggregator(&self) -> Option<&dyn PartitionedAggregation> {
         Some(self)
+    }
+
+    fn collect_live_columns(&self, lv: &mut PlIndexSet<PlSmallStr>) {
+        lv.insert(self.name.clone());
     }
 
     fn to_field(&self, input_schema: &Schema) -> PolarsResult<Field> {
@@ -194,7 +199,7 @@ impl PartitionedAggregation for ColumnExpr {
     fn evaluate_partitioned(
         &self,
         df: &DataFrame,
-        _groups: &GroupsProxy,
+        _groups: &GroupPositions,
         state: &ExecutionState,
     ) -> PolarsResult<Column> {
         self.evaluate(df, state)
@@ -203,7 +208,7 @@ impl PartitionedAggregation for ColumnExpr {
     fn finalize(
         &self,
         partitioned: Column,
-        _groups: &GroupsProxy,
+        _groups: &GroupPositions,
         _state: &ExecutionState,
     ) -> PolarsResult<Column> {
         Ok(partitioned)

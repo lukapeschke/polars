@@ -12,6 +12,86 @@ pub fn try_get_supertype(l: &DataType, r: &DataType) -> PolarsResult<DataType> {
     )
 }
 
+pub fn try_get_supertype_with_options(
+    l: &DataType,
+    r: &DataType,
+    options: SuperTypeOptions,
+) -> PolarsResult<DataType> {
+    get_supertype_with_options(l, r, options).ok_or_else(
+        || polars_err!(SchemaMismatch: "failed to determine supertype of {} and {}", l, r),
+    )
+}
+
+/// Returns a numeric supertype that `l` and `r` can be safely upcasted to if it exists.
+pub fn get_numeric_upcast_supertype_lossless(l: &DataType, r: &DataType) -> Option<DataType> {
+    use DataType::*;
+
+    if l == r || matches!(l, Unknown(_)) || matches!(r, Unknown(_)) {
+        None
+    } else if l.is_float() && r.is_float() {
+        match (l, r) {
+            (Float64, _) | (_, Float64) => Some(Float64),
+            v => {
+                // Did we add a new float type?
+                if cfg!(debug_assertions) {
+                    panic!("{:?}", v)
+                } else {
+                    None
+                }
+            },
+        }
+    } else if l.is_signed_integer() && r.is_signed_integer() {
+        match (l, r) {
+            (Int128, _) | (_, Int128) => Some(Int128),
+            (Int64, _) | (_, Int64) => Some(Int64),
+            (Int32, _) | (_, Int32) => Some(Int32),
+            (Int16, _) | (_, Int16) => Some(Int16),
+            (Int8, _) | (_, Int8) => Some(Int8),
+            v => {
+                if cfg!(debug_assertions) {
+                    panic!("{:?}", v)
+                } else {
+                    None
+                }
+            },
+        }
+    } else if l.is_unsigned_integer() && r.is_unsigned_integer() {
+        match (l, r) {
+            (UInt64, _) | (_, UInt64) => Some(UInt64),
+            (UInt32, _) | (_, UInt32) => Some(UInt32),
+            (UInt16, _) | (_, UInt16) => Some(UInt16),
+            (UInt8, _) | (_, UInt8) => Some(UInt8),
+            v => {
+                if cfg!(debug_assertions) {
+                    panic!("{:?}", v)
+                } else {
+                    None
+                }
+            },
+        }
+    } else if l.is_integer() && r.is_integer() {
+        // One side is signed, the other is unsigned. We just need to upcast the
+        // unsigned side to a signed integer with the next-largest bit width.
+        match (l, r) {
+            (UInt64, _) | (_, UInt64) | (Int128, _) | (_, Int128) => Some(Int128),
+            (UInt32, _) | (_, UInt32) | (Int64, _) | (_, Int64) => Some(Int64),
+            (UInt16, _) | (_, UInt16) | (Int32, _) | (_, Int32) => Some(Int32),
+            (UInt8, _) | (_, UInt8) | (Int16, _) | (_, Int16) => Some(Int16),
+            v => {
+                // One side was UInt and we should have already matched against
+                // all the UInt types
+                if cfg!(debug_assertions) {
+                    panic!("{:?}", v)
+                } else {
+                    None
+                }
+            },
+        }
+    } else {
+        None
+    }
+}
+
 bitflags! {
     #[repr(transparent)]
     #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -112,6 +192,12 @@ pub fn get_supertype_with_options(
             (Int16, Float32) => Some(Float32),
             #[cfg(feature = "dtype-i16")]
             (Int16, Float64) => Some(Float64),
+
+
+            #[cfg(feature = "dtype-i128")]
+            (a, Int128) if a.is_integer() => Some(Int128),
+            #[cfg(feature = "dtype-i128")]
+            (a, Int128) if a.is_float() => Some(Float64),
 
             (Int32, Boolean) => Some(Int32),
             #[cfg(feature = "dtype-i8")]
@@ -332,7 +418,7 @@ pub fn get_supertype_with_options(
                     // Keep unknown
                     dynam if dt.is_null() => Some(Unknown(*dynam)),
                     // Find integers sizes
-                    UnknownKind::Int(v) if dt.is_numeric() => {
+                    UnknownKind::Int(v) if dt.is_primitive_numeric() => {
                         // Both dyn int
                         if let Unknown(UnknownKind::Int(v_other)) = dt {
                             // Take the maximum value to ensure we bubble up the required minimal size.
@@ -365,7 +451,7 @@ pub fn get_supertype_with_options(
                 super_type_structs(fields_a, fields_b)
             }
             #[cfg(feature = "dtype-struct")]
-            (Struct(fields_a), rhs) if rhs.is_numeric() => {
+            (Struct(fields_a), rhs) if rhs.is_primitive_numeric() => {
                 let mut new_fields = Vec::with_capacity(fields_a.len());
                 for a in fields_a {
                     let st = get_supertype(&a.dtype, rhs)?;
@@ -451,17 +537,24 @@ fn super_type_structs(fields_a: &[Field], fields_b: &[Field]) -> Option<DataType
 pub fn materialize_dyn_int(v: i128) -> AnyValue<'static> {
     // Try to get the "smallest" fitting value.
     // TODO! next breaking go to true smallest.
-    match i32::try_from(v).ok() {
-        Some(v) => AnyValue::Int32(v),
-        None => match i64::try_from(v).ok() {
-            Some(v) => AnyValue::Int64(v),
-            None => match u64::try_from(v).ok() {
-                Some(v) => AnyValue::UInt64(v),
-                None => AnyValue::Null,
-            },
-        },
+    if let Ok(v) = i32::try_from(v) {
+        return AnyValue::Int32(v);
     }
+    if let Ok(v) = i64::try_from(v) {
+        return AnyValue::Int64(v);
+    }
+    if let Ok(v) = u64::try_from(v) {
+        return AnyValue::UInt64(v);
+    }
+    #[cfg(feature = "dtype-i128")]
+    {
+        AnyValue::Int128(v)
+    }
+
+    #[cfg(not(feature = "dtype-i128"))]
+    AnyValue::Null
 }
+
 fn materialize_dyn_int_pos(v: i128) -> AnyValue<'static> {
     // Try to get the "smallest" fitting value.
     // TODO! next breaking go to true smallest.

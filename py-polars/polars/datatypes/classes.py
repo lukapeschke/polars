@@ -142,7 +142,7 @@ class DataType(metaclass=DataTypeClass):
         Parameters
         ----------
         other
-            the other polars dtype to compare with.
+            the other Polars dtype to compare with.
 
         Examples
         --------
@@ -317,6 +317,17 @@ class Int32(SignedIntegerType):
 
 class Int64(SignedIntegerType):
     """64-bit signed integer type."""
+
+
+class Int128(SignedIntegerType):
+    """
+    128-bit signed integer type.
+
+    .. warning::
+        This functionality is considered **unstable**.
+        It is a work-in-progress feature and may not always work as expected.
+        It may be changed at any point without it being considered a breaking change.
+    """
 
 
 class UInt8(UnsignedIntegerType):
@@ -629,8 +640,7 @@ class Enum(DataType):
                     raise TypeError(msg)
 
             enum_values = [
-                (v if isinstance(v, str) else v.value)
-                for v in categories.__members__.values()
+                getattr(v, "value", v) for v in categories.__members__.values()
             ]
             categories = pl.Series(values=enum_values)
         elif not isinstance(categories, pl.Series):

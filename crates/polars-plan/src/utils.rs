@@ -87,7 +87,7 @@ pub(crate) fn has_leaf_literal(e: &Expr) -> bool {
 #[cfg(feature = "is_in")]
 pub(crate) fn all_return_scalar(e: &Expr) -> bool {
     match e {
-        Expr::Literal(lv) => lv.projects_as_scalar(),
+        Expr::Literal(lv) => lv.is_scalar(),
         Expr::Function { options: opt, .. } => opt.flags.contains(FunctionFlags::RETURNS_SCALAR),
         Expr::Agg(_) => true,
         Expr::Column(_) | Expr::Wildcard => false,
@@ -262,7 +262,12 @@ pub fn expressions_to_schema(
 ) -> PolarsResult<Schema> {
     let mut expr_arena = Arena::with_capacity(4 * expr.len());
     expr.iter()
-        .map(|expr| expr.to_field_amortized(schema, ctxt, &mut expr_arena))
+        .map(|expr| {
+            let mut field = expr.to_field_amortized(schema, ctxt, &mut expr_arena)?;
+
+            field.dtype = field.dtype.materialize_unknown(true)?;
+            Ok(field)
+        })
         .collect()
 }
 
@@ -330,14 +335,13 @@ pub(crate) fn expr_irs_to_schema<I: IntoIterator<Item = K>, K: AsRef<ExprIR>>(
     expr.into_iter()
         .map(|e| {
             let e = e.as_ref();
-            let mut field = arena
-                .get(e.node())
-                .to_field(schema, ctxt, arena)
-                .expect("should be resolved");
+            let mut field = e.field(schema, ctxt, arena).expect("should be resolved");
 
+            // TODO! (can this be removed?)
             if let Some(name) = e.get_alias() {
                 field.name = name.clone()
             }
+            field.dtype = field.dtype.materialize_unknown(true).unwrap();
             field
         })
         .collect()

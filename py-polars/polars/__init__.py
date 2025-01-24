@@ -23,6 +23,7 @@ from polars._utils.polars_version import get_polars_version as _get_polars_versi
 
 # TODO: remove need for importing wrap utils at top level
 from polars._utils.wrap import wrap_df, wrap_s  # noqa: F401
+from polars.catalog import Catalog
 from polars.config import Config
 from polars.convert import (
     from_arrow,
@@ -54,6 +55,7 @@ from polars.datatypes import (
     Int16,
     Int32,
     Int64,
+    Int128,
     List,
     Null,
     Object,
@@ -181,6 +183,7 @@ from polars.io import (
 from polars.io.cloud import (
     CredentialProvider,
     CredentialProviderAWS,
+    CredentialProviderAzure,
     CredentialProviderFunction,
     CredentialProviderFunctionReturn,
     CredentialProviderGCP,
@@ -239,6 +242,7 @@ __all__ = [
     "Int16",
     "Int32",
     "Int64",
+    "Int128",
     "List",
     "Null",
     "Object",
@@ -275,9 +279,11 @@ __all__ = [
     "scan_ndjson",
     "scan_parquet",
     "scan_pyarrow_dataset",
+    "Catalog",
     # polars.io.cloud
     "CredentialProvider",
     "CredentialProviderAWS",
+    "CredentialProviderAzure",
     "CredentialProviderFunction",
     "CredentialProviderFunctionReturn",
     "CredentialProviderGCP",
@@ -431,43 +437,3 @@ def __getattr__(name: str) -> Any:
 
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
-
-
-# fork() breaks Polars thread pool, so warn users who might be doing this.
-# Keep track so that we warn only once
-_WARNED = False
-
-
-def __install_postfork_hook() -> None:
-    message = """\
-Using fork() can cause Polars to deadlock in the child process.
-In addition, using fork() with Python in general is a recipe for mysterious
-deadlocks and crashes.
-
-The most likely reason you are seeing this error is because you are using the
-multiprocessing module on Linux, which uses fork() by default. This will be
-fixed in Python 3.14. Until then, you want to use the "spawn" context instead.
-
-See https://docs.pola.rs/user-guide/misc/multiprocessing/ for details.
-
-If you really know what your doing, you can silence this warning with the warning module
-or by setting POLARS_ALLOW_FORKING_THREAD=1.
-"""
-    import os
-
-    if os.environ.get("POLARS_ALLOW_FORKING_THREAD") == "1":
-        return None
-
-    def before_hook() -> None:
-        global _WARNED
-        if not _WARNED:
-            import warnings
-
-            warnings.warn(message, RuntimeWarning, stacklevel=2)
-            _WARNED = True
-
-    if hasattr(os, "register_at_fork"):
-        os.register_at_fork(before=before_hook)
-
-
-__install_postfork_hook()

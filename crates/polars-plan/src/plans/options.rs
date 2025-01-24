@@ -13,7 +13,7 @@ use polars_io::ipc::IpcWriterOptions;
 use polars_io::json::JsonWriterOptions;
 #[cfg(feature = "parquet")]
 use polars_io::parquet::write::ParquetWriteOptions;
-use polars_io::{HiveOptions, RowIndex};
+use polars_io::{is_cloud_url, HiveOptions, RowIndex};
 #[cfg(feature = "dynamic_group_by")]
 use polars_time::{DynamicGroupOptions, RollingGroupOptions};
 #[cfg(feature = "serde")]
@@ -46,12 +46,13 @@ pub struct FileScanOptions {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct UnionOptions {
     pub slice: Option<(i64, usize)>,
-    pub parallel: bool,
     // known row_output, estimated row output
     pub rows: (Option<usize>, usize),
+    pub parallel: bool,
     pub from_partitioned_ds: bool,
     pub flattened_by_opt: bool,
     pub rechunk: bool,
+    pub maintain_order: bool,
 }
 
 #[derive(Clone, Debug, Copy, Default, Eq, PartialEq, Hash)]
@@ -69,6 +70,30 @@ pub struct GroupbyOptions {
     pub rolling: Option<RollingGroupOptions>,
     /// Take only a slice of the result
     pub slice: Option<(i64, usize)>,
+}
+
+impl GroupbyOptions {
+    pub(crate) fn is_rolling(&self) -> bool {
+        #[cfg(feature = "dynamic_group_by")]
+        {
+            self.rolling.is_some()
+        }
+        #[cfg(not(feature = "dynamic_group_by"))]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn is_dynamic(&self) -> bool {
+        #[cfg(feature = "dynamic_group_by")]
+        {
+            self.dynamic.is_some()
+        }
+        #[cfg(not(feature = "dynamic_group_by"))]
+        {
+            false
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default, Hash)]
@@ -180,23 +205,38 @@ impl Default for FunctionFlags {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum CastingRules {
+    /// Whether information may be lost during cast. E.g. a float to int is considered lossy,
+    /// whereas int to int is considered lossless.
+    /// Overflowing is not considered in this flag, that's handled in `strict` casting
+    FirstArgLossless,
+    Supertype(SuperTypeOptions),
+}
+
+impl CastingRules {
+    pub fn cast_to_supertypes() -> CastingRules {
+        Self::Supertype(Default::default())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct FunctionOptions {
     /// Collect groups to a list and apply the function over the groups.
     /// This can be important in aggregation context.
     pub collect_groups: ApplyOptions,
-    // used for formatting, (only for anonymous functions)
-    #[cfg_attr(feature = "serde", serde(skip_deserializing))]
-    pub fmt_str: &'static str,
-    // if the expression and its inputs should be cast to supertypes
-    // `None` -> Don't cast.
-    // `Some` -> cast with given options.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub cast_to_supertypes: Option<SuperTypeOptions>,
+
     // Validate the output of a `map`.
     // this should always be true or we could OOB
     pub check_lengths: UnsafeBool,
     pub flags: FunctionFlags,
+
+    // used for formatting, (only for anonymous functions)
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub fmt_str: &'static str,
+    /// Options used when deciding how to cast the arguments of the function.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub cast_options: Option<CastingRules>,
 }
 
 impl FunctionOptions {
@@ -212,9 +252,8 @@ impl FunctionOptions {
         matches!(
             self.collect_groups,
             ApplyOptions::ElementWise | ApplyOptions::ApplyList
-        ) && !self
-            .flags
-            .contains(FunctionFlags::CHANGES_LENGTH | FunctionFlags::RETURNS_SCALAR)
+        ) && !self.flags.contains(FunctionFlags::CHANGES_LENGTH)
+            && !self.flags.contains(FunctionFlags::RETURNS_SCALAR)
     }
 }
 
@@ -222,9 +261,9 @@ impl Default for FunctionOptions {
     fn default() -> Self {
         FunctionOptions {
             collect_groups: ApplyOptions::GroupWise,
-            fmt_str: "",
-            cast_to_supertypes: None,
             check_lengths: UnsafeBool(true),
+            fmt_str: Default::default(),
+            cast_options: Default::default(),
             flags: Default::default(),
         }
     }
@@ -255,11 +294,10 @@ pub struct PythonOptions {
     pub with_columns: Option<Arc<[PlSmallStr]>>,
     // Which interface is the python function.
     pub python_source: PythonScanSource,
-    /// Optional predicate the reader must apply.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub predicate: PythonPredicate,
     /// A `head` call passed to the reader.
     pub n_rows: Option<usize>,
+    /// Optional predicate the reader must apply.
+    pub predicate: PythonPredicate,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -272,6 +310,7 @@ pub enum PythonScanSource {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum PythonPredicate {
     // A pyarrow predicate python expression
     // can be evaluated with python.eval
@@ -295,13 +334,20 @@ pub enum SinkType {
     File {
         path: Arc<PathBuf>,
         file_type: FileType,
-    },
-    #[cfg(feature = "cloud")]
-    Cloud {
-        uri: Arc<String>,
-        file_type: FileType,
         cloud_options: Option<polars_io::cloud::CloudOptions>,
     },
+}
+
+impl SinkType {
+    pub(crate) fn is_cloud_destination(&self) -> bool {
+        if let Self::File { path, .. } = self {
+            if is_cloud_url(path.as_ref()) {
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -365,6 +411,7 @@ pub struct UnionArgs {
     pub diagonal: bool,
     // If it is a union from a scan over multiple files.
     pub from_partitioned_ds: bool,
+    pub maintain_order: bool,
 }
 
 impl Default for UnionArgs {
@@ -375,6 +422,7 @@ impl Default for UnionArgs {
             to_supertypes: false,
             diagonal: false,
             from_partitioned_ds: false,
+            maintain_order: true,
         }
     }
 }
@@ -388,6 +436,7 @@ impl From<UnionArgs> for UnionOptions {
             from_partitioned_ds: args.from_partitioned_ds,
             flattened_by_opt: false,
             rechunk: args.rechunk,
+            maintain_order: args.maintain_order,
         }
     }
 }

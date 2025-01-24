@@ -3,7 +3,7 @@ use std::sync::Arc;
 use polars_core::datatypes::Field;
 use polars_core::error::PolarsResult;
 use polars_core::frame::DataFrame;
-use polars_core::prelude::{DataType, SchemaRef, Series, IDX_DTYPE};
+use polars_core::prelude::{DataType, PlIndexSet, SchemaRef, Series, IDX_DTYPE};
 use polars_core::schema::Schema;
 use polars_expr::state::ExecutionState;
 use polars_io::predicates::PhysicalIoExpr;
@@ -32,9 +32,7 @@ impl PhysicalIoExpr for Len {
         unimplemented!()
     }
 
-    fn live_variables(&self) -> Option<Vec<PlSmallStr>> {
-        Some(vec![])
-    }
+    fn collect_live_columns(&self, _live_columns: &mut PlIndexSet<PlSmallStr>) {}
 }
 impl PhysicalPipedExpr for Len {
     fn evaluate(&self, chunk: &DataChunk, _lazy_state: &ExecutionState) -> PolarsResult<Series> {
@@ -110,7 +108,7 @@ pub fn can_convert_to_hash_agg(
                             DataType::Date => {
                                 matches!(agg_fn, IRAggExpr::Mean(_) | IRAggExpr::Median(_))
                             },
-                            _ => field.dtype.to_physical().is_numeric(),
+                            _ => field.dtype.to_physical().is_primitive_numeric(),
                         }
                     } else {
                         false

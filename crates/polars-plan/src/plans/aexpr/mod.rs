@@ -3,7 +3,6 @@ mod hash;
 mod scalar;
 mod schema;
 mod traverse;
-mod utils;
 
 use std::hash::{Hash, Hasher};
 
@@ -18,8 +17,8 @@ pub use scalar::is_scalar_ae;
 use serde::{Deserialize, Serialize};
 use strum_macros::IntoStaticStr;
 pub use traverse::*;
-pub(crate) use utils::permits_filter_pushdown;
-pub use utils::*;
+mod properties;
+pub use properties::*;
 
 use crate::constants::LEN;
 use crate::plans::Context;
@@ -48,11 +47,10 @@ pub enum IRAggExpr {
         method: QuantileMethod,
     },
     Sum(Node),
+    // include_nulls
     Count(Node, bool),
     Std(Node, u8),
     Var(Node, u8),
-    #[cfg(feature = "bitwise")]
-    Bitwise(Node, BitwiseAggFunction),
     AggGroups(Node),
 }
 
@@ -67,8 +65,6 @@ impl Hash for IRAggExpr {
                 method: interpol, ..
             } => interpol.hash(state),
             Self::Std(_, v) | Self::Var(_, v) => v.hash(state),
-            #[cfg(feature = "bitwise")]
-            Self::Bitwise(_, f) => f.hash(state),
             _ => {},
         }
     }
@@ -98,8 +94,6 @@ impl IRAggExpr {
             (Quantile { method: l, .. }, Quantile { method: r, .. }) => l == r,
             (Std(_, l), Std(_, r)) => l == r,
             (Var(_, l), Var(_, r)) => l == r,
-            #[cfg(feature = "bitwise")]
-            (Bitwise(_, l), Bitwise(_, r)) => l == r,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -133,8 +127,6 @@ impl From<IRAggExpr> for GroupByMethod {
             Count(_, include_nulls) => GroupByMethod::Count { include_nulls },
             Std(_, ddof) => GroupByMethod::Std(ddof),
             Var(_, ddof) => GroupByMethod::Var(ddof),
-            #[cfg(feature = "bitwise")]
-            Bitwise(_, f) => GroupByMethod::Bitwise(f.into()),
             AggGroups(_) => GroupByMethod::Groups,
             Quantile { .. } => unreachable!(),
         }
@@ -220,43 +212,6 @@ impl AExpr {
         AExpr::Column(name)
     }
 
-    /// Checks whether this expression is elementwise. This only checks the top level expression.
-    pub(crate) fn is_elementwise_top_level(&self) -> bool {
-        use AExpr::*;
-
-        match self {
-            AnonymousFunction { options, .. } => options.is_elementwise(),
-
-            // Non-strict strptime must be done in-memory to ensure the format
-            // is consistent across the entire dataframe.
-            #[cfg(feature = "strings")]
-            Function {
-                options,
-                function: FunctionExpr::StringExpr(StringFunction::Strptime(_, opts)),
-                ..
-            } => {
-                assert!(options.is_elementwise());
-                opts.strict
-            },
-
-            Function { options, .. } => options.is_elementwise(),
-
-            Literal(v) => v.projects_as_scalar(),
-
-            Alias(_, _) | BinaryExpr { .. } | Column(_) | Ternary { .. } | Cast { .. } => true,
-
-            Agg { .. }
-            | Explode(_)
-            | Filter { .. }
-            | Gather { .. }
-            | Len
-            | Slice { .. }
-            | Sort { .. }
-            | SortBy { .. }
-            | Window { .. } => false,
-        }
-    }
-
     /// This should be a 1 on 1 copy of the get_type method of Expr until Expr is completely phased out.
     pub fn get_type(
         &self,
@@ -266,9 +221,5 @@ impl AExpr {
     ) -> PolarsResult<DataType> {
         self.to_field(schema, ctxt, arena)
             .map(|f| f.dtype().clone())
-    }
-
-    pub(crate) fn is_leaf(&self) -> bool {
-        matches!(self, AExpr::Column(_) | AExpr::Literal(_) | AExpr::Len)
     }
 }

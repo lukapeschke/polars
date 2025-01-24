@@ -9,7 +9,7 @@ pub trait PhysicalIoExpr: Send + Sync {
 
     /// Get the variables that are used in the expression i.e. live variables.
     /// This can contain duplicates.
-    fn live_variables(&self) -> Option<Vec<PlSmallStr>>;
+    fn collect_live_columns(&self, live_columns: &mut PlIndexSet<PlSmallStr>);
 
     /// Can take &dyn Statistics and determine of a file should be
     /// read -> `true`
@@ -196,7 +196,7 @@ impl ColumnStats {
 
 /// Returns whether the [`DataType`] supports minimum/maximum operations.
 fn use_min_max(dtype: &DataType) -> bool {
-    dtype.is_numeric()
+    dtype.is_primitive_numeric()
         || dtype.is_temporal()
         || matches!(
             dtype,
@@ -212,6 +212,16 @@ pub struct BatchStats {
     stats: Vec<ColumnStats>,
     // This might not be available, as when pruning hive partitions.
     num_rows: Option<usize>,
+}
+
+impl Default for BatchStats {
+    fn default() -> Self {
+        Self {
+            schema: Arc::new(Schema::default()),
+            stats: Vec::new(),
+            num_rows: None,
+        }
+    }
 }
 
 impl BatchStats {

@@ -58,8 +58,8 @@ impl<T: AsRef<str>> AsRef<[u8]> for StrAsBytes<T> {
 ///
 /// # Safety
 /// The following invariants hold:
-/// * Two consecutives `offsets` casted (`as`) to `usize` are valid slices of `values`.
-/// * A slice of `values` taken from two consecutives `offsets` is valid `utf8`.
+/// * Two consecutive `offsets` cast (`as`) to `usize` are valid slices of `values`.
+/// * A slice of `values` taken from two consecutive `offsets` is valid `utf8`.
 /// * `len` is equal to `validity.len()`, when defined.
 #[derive(Clone)]
 pub struct Utf8Array<O: Offset> {
@@ -376,7 +376,7 @@ impl<O: Offset> Utf8Array<O> {
         debug_assert!(
             validity
                 .as_ref()
-                .map_or(true, |validity| validity.len() == offsets.len_proxy()),
+                .is_none_or(|validity| validity.len() == offsets.len_proxy()),
             "validity mask length must match the number of values"
         );
         debug_assert!(

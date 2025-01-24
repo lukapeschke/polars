@@ -45,9 +45,11 @@ use polars_core::utils::slice_offsets;
 #[allow(unused_imports)]
 use polars_core::utils::slice_slice;
 use polars_core::POOL;
+use polars_error::check_signals;
 use polars_utils::hashing::BytesHash;
 use rayon::prelude::*;
 
+use self::cross_join::fused_cross_filter;
 use super::IntoDf;
 
 pub trait DataFrameJoinOps: IntoDf {
@@ -63,7 +65,8 @@ pub trait DataFrameJoinOps: IntoDf {
     /// let df2: DataFrame = df!("Name" => &["Apple", "Banana", "Pear"],
     ///                          "Potassium (mg/100g)" => &[107, 358, 115])?;
     ///
-    /// let df3: DataFrame = df1.join(&df2, ["Fruit"], ["Name"], JoinArgs::new(JoinType::Inner))?;
+    /// let df3: DataFrame = df1.join(&df2, ["Fruit"], ["Name"], JoinArgs::new(JoinType::Inner),
+    /// None)?;
     /// assert_eq!(df3.shape(), (3, 3));
     /// println!("{}", df3);
     /// # Ok::<(), PolarsError>(())
@@ -91,6 +94,7 @@ pub trait DataFrameJoinOps: IntoDf {
         left_on: impl IntoIterator<Item = impl Into<PlSmallStr>>,
         right_on: impl IntoIterator<Item = impl Into<PlSmallStr>>,
         args: JoinArgs,
+        options: Option<JoinTypeOptions>,
     ) -> PolarsResult<DataFrame> {
         let df_left = self.to_df();
         let selected_left = df_left.select_columns(left_on)?;
@@ -105,7 +109,15 @@ pub trait DataFrameJoinOps: IntoDf {
             .map(Column::take_materialized_series)
             .collect::<Vec<_>>();
 
-        self._join_impl(other, selected_left, selected_right, args, true, false)
+        self._join_impl(
+            other,
+            selected_left,
+            selected_right,
+            args,
+            options,
+            true,
+            false,
+        )
     }
 
     #[doc(hidden)]
@@ -117,6 +129,7 @@ pub trait DataFrameJoinOps: IntoDf {
         mut selected_left: Vec<Series>,
         mut selected_right: Vec<Series>,
         mut args: JoinArgs,
+        options: Option<JoinTypeOptions>,
         _check_rechunk: bool,
         _verbose: bool,
     ) -> PolarsResult<DataFrame> {
@@ -124,6 +137,10 @@ pub trait DataFrameJoinOps: IntoDf {
 
         #[cfg(feature = "cross_join")]
         if let JoinType::Cross = args.how {
+            if let Some(JoinTypeOptions::Cross(cross_options)) = &options {
+                assert!(args.slice.is_none());
+                return fused_cross_filter(left_df, other, args.suffix.clone(), cross_options);
+            }
             return left_df.cross_join(other, args.suffix.clone(), args.slice);
         }
 
@@ -178,6 +195,7 @@ pub trait DataFrameJoinOps: IntoDf {
                     selected_left,
                     selected_right,
                     args,
+                    options,
                     false,
                     _verbose,
                 );
@@ -212,7 +230,10 @@ pub trait DataFrameJoinOps: IntoDf {
         }
 
         #[cfg(feature = "iejoin")]
-        if let JoinType::IEJoin(options) = args.how {
+        if let JoinType::IEJoin = args.how {
+            let Some(JoinTypeOptions::IEJoin(options)) = options else {
+                unreachable!()
+            };
             let func = if POOL.current_num_threads() > 1 && !left_df.is_empty() && !other.is_empty()
             {
                 iejoin::iejoin_par
@@ -287,6 +308,7 @@ pub trait DataFrameJoinOps: IntoDf {
                         args.suffix.clone(),
                         args.slice,
                         should_coalesce,
+                        options.allow_eq,
                     ),
                     (None, None) => left_df._join_asof(
                         other,
@@ -297,13 +319,14 @@ pub trait DataFrameJoinOps: IntoDf {
                         args.suffix,
                         args.slice,
                         should_coalesce,
+                        options.allow_eq,
                     ),
                     _ => {
                         panic!("expected by arguments on both sides")
                     },
                 },
                 #[cfg(feature = "iejoin")]
-                JoinType::IEJoin(_) => {
+                JoinType::IEJoin => {
                     unreachable!()
                 },
                 JoinType::Cross => {
@@ -331,7 +354,7 @@ pub trait DataFrameJoinOps: IntoDf {
                 ComputeError: "asof join not supported for join on multiple keys"
             ),
             #[cfg(feature = "iejoin")]
-            JoinType::IEJoin(_) => {
+            JoinType::IEJoin => {
                 unreachable!()
             },
             JoinType::Cross => {
@@ -390,6 +413,7 @@ pub trait DataFrameJoinOps: IntoDf {
                 vec![lhs_keys],
                 vec![rhs_keys],
                 args,
+                options,
                 _check_rechunk,
                 _verbose,
             ),
@@ -413,7 +437,13 @@ pub trait DataFrameJoinOps: IntoDf {
         left_on: impl IntoIterator<Item = impl Into<PlSmallStr>>,
         right_on: impl IntoIterator<Item = impl Into<PlSmallStr>>,
     ) -> PolarsResult<DataFrame> {
-        self.join(other, left_on, right_on, JoinArgs::new(JoinType::Inner))
+        self.join(
+            other,
+            left_on,
+            right_on,
+            JoinArgs::new(JoinType::Inner),
+            None,
+        )
     }
 
     /// Perform a left outer join on two DataFrames
@@ -457,7 +487,13 @@ pub trait DataFrameJoinOps: IntoDf {
         left_on: impl IntoIterator<Item = impl Into<PlSmallStr>>,
         right_on: impl IntoIterator<Item = impl Into<PlSmallStr>>,
     ) -> PolarsResult<DataFrame> {
-        self.join(other, left_on, right_on, JoinArgs::new(JoinType::Left))
+        self.join(
+            other,
+            left_on,
+            right_on,
+            JoinArgs::new(JoinType::Left),
+            None,
+        )
     }
 
     /// Perform a full outer join on two DataFrames
@@ -476,7 +512,13 @@ pub trait DataFrameJoinOps: IntoDf {
         left_on: impl IntoIterator<Item = impl Into<PlSmallStr>>,
         right_on: impl IntoIterator<Item = impl Into<PlSmallStr>>,
     ) -> PolarsResult<DataFrame> {
-        self.join(other, left_on, right_on, JoinArgs::new(JoinType::Full))
+        self.join(
+            other,
+            left_on,
+            right_on,
+            JoinArgs::new(JoinType::Full),
+            None,
+        )
     }
 }
 
@@ -504,25 +546,62 @@ trait DataFrameJoinOpsPrivate: IntoDf {
             join_tuples_right = slice_slice(join_tuples_right, offset, len);
         }
 
-        let (df_left, df_right) = POOL.join(
-            // SAFETY: join indices are known to be in bounds
-            || unsafe {
-                left_df._create_left_df_from_slice(
-                    join_tuples_left,
-                    false,
-                    args.slice.is_some(),
-                    sorted,
-                )
-            },
-            || unsafe {
-                if let Some(drop_names) = drop_names {
-                    other.drop_many(drop_names)
-                } else {
-                    other.drop(s_right.name()).unwrap()
+        let other = if let Some(drop_names) = drop_names {
+            other.drop_many(drop_names)
+        } else {
+            other.drop(s_right.name()).unwrap()
+        };
+
+        let mut left = unsafe { IdxCa::mmap_slice("a".into(), join_tuples_left) };
+        if sorted {
+            left.set_sorted_flag(IsSorted::Ascending);
+        }
+        let right = unsafe { IdxCa::mmap_slice("b".into(), join_tuples_right) };
+
+        let already_left_sorted = sorted
+            && matches!(
+                args.maintain_order,
+                MaintainOrderJoin::Left | MaintainOrderJoin::LeftRight
+            );
+        check_signals()?;
+        let (df_left, df_right) =
+            if args.maintain_order != MaintainOrderJoin::None && !already_left_sorted {
+                let mut df =
+                    DataFrame::new(vec![left.into_series().into(), right.into_series().into()])?;
+
+                let columns = match args.maintain_order {
+                    MaintainOrderJoin::Left | MaintainOrderJoin::LeftRight => vec!["a"],
+                    MaintainOrderJoin::Right | MaintainOrderJoin::RightLeft => vec!["b"],
+                    _ => unreachable!(),
+                };
+
+                let options = SortMultipleOptions::new()
+                    .with_order_descending(false)
+                    .with_maintain_order(true);
+
+                df.sort_in_place(columns, options)?;
+
+                let [mut a, b]: [Column; 2] = df.take_columns().try_into().unwrap();
+                if matches!(
+                    args.maintain_order,
+                    MaintainOrderJoin::Left | MaintainOrderJoin::LeftRight
+                ) {
+                    a.set_sorted_flag(IsSorted::Ascending);
                 }
-                ._take_unchecked_slice(join_tuples_right, true)
-            },
-        );
+
+                POOL.join(
+                    // SAFETY: join indices are known to be in bounds
+                    || unsafe { left_df.take_unchecked(a.idx().unwrap()) },
+                    || unsafe { other.take_unchecked(b.idx().unwrap()) },
+                )
+            } else {
+                POOL.join(
+                    // SAFETY: join indices are known to be in bounds
+                    || unsafe { left_df.take_unchecked(left.into_series().idx().unwrap()) },
+                    || unsafe { other.take_unchecked(right.into_series().idx().unwrap()) },
+                )
+            };
+
         _finish_join(df_left, df_right, args.suffix.clone())
     }
 }
@@ -536,9 +615,9 @@ fn prepare_keys_multiple(s: &[Series], join_nulls: bool) -> PolarsResult<BinaryO
         .map(|s| {
             let phys = s.to_physical_repr();
             match phys.dtype() {
-                DataType::Float32 => phys.f32().unwrap().to_canonical().into_series(),
-                DataType::Float64 => phys.f64().unwrap().to_canonical().into_series(),
-                _ => phys.into_owned(),
+                DataType::Float32 => phys.f32().unwrap().to_canonical().into_column(),
+                DataType::Float64 => phys.f64().unwrap().to_canonical().into_column(),
+                _ => phys.into_owned().into_column(),
             }
         })
         .collect::<Vec<_>>();

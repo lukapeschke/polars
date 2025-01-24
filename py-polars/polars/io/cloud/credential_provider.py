@@ -2,29 +2,52 @@ from __future__ import annotations
 
 import abc
 import importlib.util
+import json
 import os
+import subprocess
 import sys
 import zoneinfo
-from typing import IO, TYPE_CHECKING, Any, Callable, Literal, Optional, TypedDict, Union
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, TypedDict, Union
 
 if TYPE_CHECKING:
     if sys.version_info >= (3, 10):
         from typing import TypeAlias
     else:
         from typing_extensions import TypeAlias
-    from pathlib import Path
 
 from polars._utils.unstable import issue_unstable_warning
 
 # These typedefs are here to avoid circular import issues, as
 # `CredentialProviderFunction` specifies "CredentialProvider"
-CredentialProviderFunctionReturn: TypeAlias = tuple[
-    dict[str, Optional[str]], Optional[int]
-]
+CredentialProviderFunctionReturn: TypeAlias = tuple[dict[str, str], Optional[int]]
 
 CredentialProviderFunction: TypeAlias = Union[
     Callable[[], CredentialProviderFunctionReturn], "CredentialProvider"
 ]
+
+# https://docs.rs/object_store/latest/object_store/enum.ClientConfigKey.html
+OBJECT_STORE_CLIENT_OPTIONS: frozenset[str] = frozenset(
+    [
+        "allow_http",
+        "allow_invalid_certificates",
+        "connect_timeout",
+        "default_content_type",
+        "http1_only",
+        "http2_only",
+        "http2_keep_alive_interval",
+        "http2_keep_alive_timeout",
+        "http2_keep_alive_while_idle",
+        "http2_max_frame_size",
+        "pool_idle_timeout",
+        "pool_max_idle_per_host",
+        "proxy_url",
+        "proxy_ca_certificate",
+        "proxy_excludes",
+        "timeout",
+        "user_agent",
+    ]
+)
 
 
 class AWSAssumeRoleKWArgs(TypedDict):
@@ -73,6 +96,7 @@ class CredentialProviderAWS(CredentialProvider):
         self,
         *,
         profile_name: str | None = None,
+        region_name: str | None = None,
         assume_role: AWSAssumeRoleKWArgs | None = None,
     ) -> None:
         """
@@ -91,13 +115,16 @@ class CredentialProviderAWS(CredentialProvider):
 
         self._check_module_availability()
         self.profile_name = profile_name
+        self.region_name = region_name
         self.assume_role = assume_role
 
     def __call__(self) -> CredentialProviderFunctionReturn:
         """Fetch the credentials for the configured profile name."""
         import boto3
 
-        session = boto3.Session(profile_name=self.profile_name)
+        session = boto3.Session(
+            profile_name=self.profile_name, region_name=self.region_name
+        )
 
         if self.assume_role is not None:
             return self._finish_assume_role(session)
@@ -105,13 +132,13 @@ class CredentialProviderAWS(CredentialProvider):
         creds = session.get_credentials()
 
         if creds is None:
-            msg = "unexpected None value returned from boto3.Session.get_credentials()"
+            msg = "CredentialProviderAWS: unexpected None value returned from boto3.Session.get_credentials()"
             raise ValueError(msg)
 
         return {
             "aws_access_key_id": creds.access_key,
             "aws_secret_access_key": creds.secret_key,
-            "aws_session_token": creds.token,
+            **({"aws_session_token": creds.token} if creds.token is not None else {}),
         }, None
 
     def _finish_assume_role(self, session: Any) -> CredentialProviderFunctionReturn:
@@ -137,6 +164,174 @@ class CredentialProviderAWS(CredentialProvider):
         if importlib.util.find_spec("boto3") is None:
             msg = "boto3 must be installed to use `CredentialProviderAWS`"
             raise ImportError(msg)
+
+
+class CredentialProviderAzure(CredentialProvider):
+    """
+    Azure Credential Provider.
+
+    Using this requires the `azure-identity` Python package to be installed.
+
+    .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+    """
+
+    def __init__(
+        self,
+        *,
+        scopes: list[str] | None = None,
+        tenant_id: str | None = None,
+        _storage_account: str | None = None,
+        _verbose: bool = False,
+    ) -> None:
+        """
+        Initialize a credential provider for Microsoft Azure.
+
+        This uses `azure.identity.DefaultAzureCredential()`.
+
+        Parameters
+        ----------
+        scopes
+            Scopes to pass to `get_token`
+        tenant_id
+            Azure tenant ID.
+        """
+        msg = "`CredentialProviderAzure` functionality is considered unstable"
+        issue_unstable_warning(msg)
+
+        self._check_module_availability()
+
+        self.account_name = _storage_account
+        self.tenant_id = tenant_id
+        # Done like this to bypass mypy, we don't have stubs for azure.identity
+        self.credential = importlib.import_module("azure.identity").__dict__[
+            "DefaultAzureCredential"
+        ]()
+        self.scopes = (
+            scopes if scopes is not None else ["https://storage.azure.com/.default"]
+        )
+        self._verbose = _verbose
+
+        if self._verbose:
+            print(
+                (
+                    "[CredentialProviderAzure]: "
+                    f"{self.account_name = } "
+                    f"{self.tenant_id = } "
+                    f"{self.scopes = } "
+                ),
+                file=sys.stderr,
+            )
+
+    def __call__(self) -> CredentialProviderFunctionReturn:
+        """Fetch the credentials."""
+        POLARS_AUTO_USE_AZURE_STORAGE_ACCOUNT_KEY = os.getenv(
+            "POLARS_AUTO_USE_AZURE_STORAGE_ACCOUNT_KEY"
+        )
+
+        if self._verbose:
+            print(
+                "[CredentialProviderAzure]: "
+                f"{self.account_name = } "
+                f"{POLARS_AUTO_USE_AZURE_STORAGE_ACCOUNT_KEY = }",
+                file=sys.stderr,
+            )
+
+        if (
+            self.account_name is not None
+            and POLARS_AUTO_USE_AZURE_STORAGE_ACCOUNT_KEY == "1"
+        ):
+            try:
+                creds = {
+                    "account_key": self._get_azure_storage_account_key_az_cli(
+                        self.account_name
+                    )
+                }
+
+                if self._verbose:
+                    print(
+                        "[CredentialProviderAzure]: Retrieved account key from Azure CLI",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                if self._verbose:
+                    print(
+                        f"[CredentialProviderAzure]: Could not retrieve account key from Azure CLI: {e}",
+                        file=sys.stderr,
+                    )
+            else:
+                return creds, None
+
+        token = self.credential.get_token(*self.scopes, tenant_id=self.tenant_id)
+
+        return {
+            "bearer_token": token.token,
+        }, token.expires_on
+
+    @classmethod
+    def _check_module_availability(cls) -> None:
+        if importlib.util.find_spec("azure.identity") is None:
+            msg = "azure-identity must be installed to use `CredentialProviderAzure`"
+            raise ImportError(msg)
+
+    @staticmethod
+    def _extract_adls_uri_storage_account(uri: str) -> str | None:
+        # "abfss://{CONTAINER}@{STORAGE_ACCOUNT}.dfs.core.windows.net/"
+        #                      ^^^^^^^^^^^^^^^^^
+        try:
+            return (
+                uri.split("://", 1)[1]
+                .split("/", 1)[0]
+                .split("@", 1)[1]
+                .split(".dfs.core.windows.net", 1)[0]
+            )
+
+        except IndexError:
+            return None
+
+    @classmethod
+    def _get_azure_storage_account_key_az_cli(cls, account_name: str) -> str:
+        # [
+        #     {
+        #         "creationTime": "1970-01-01T00:00:00.000000+00:00",
+        #         "keyName": "key1",
+        #         "permissions": "FULL",
+        #         "value": "..."
+        #     },
+        #     {
+        #         "creationTime": "1970-01-01T00:00:00.000000+00:00",
+        #         "keyName": "key2",
+        #         "permissions": "FULL",
+        #         "value": "..."
+        #     }
+        # ]
+
+        return json.loads(
+            cls._azcli(
+                "storage",
+                "account",
+                "keys",
+                "list",
+                "--output",
+                "json",
+                "--account-name",
+                account_name,
+            )
+        )[0]["value"]
+
+    @classmethod
+    def _azcli_version(cls) -> str | None:
+        try:
+            return json.loads(cls._azcli("version"))["azure-cli"]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _azcli(*args: str) -> bytes:
+        return subprocess.check_output(
+            ["az", *args] if sys.platform != "win32" else ["cmd", "/C", "az", *args]
+        )
 
 
 class CredentialProviderGCP(CredentialProvider):
@@ -165,7 +360,7 @@ class CredentialProviderGCP(CredentialProvider):
         ----------
         Parameters are passed to `google.auth.default()`
         """
-        msg = "`CredentialProviderAWS` functionality is considered unstable"
+        msg = "`CredentialProviderGCP` functionality is considered unstable"
         issue_unstable_warning(msg)
 
         self._check_module_availability()
@@ -194,7 +389,7 @@ class CredentialProviderGCP(CredentialProvider):
         self.creds = creds
 
     def __call__(self) -> CredentialProviderFunctionReturn:
-        """Fetch the credentials for the configured profile name."""
+        """Fetch the credentials."""
         import google.auth.transport.requests
 
         self.creds.refresh(google.auth.transport.requests.__dict__["Request"]())
@@ -220,16 +415,7 @@ class CredentialProviderGCP(CredentialProvider):
 
 def _maybe_init_credential_provider(
     credential_provider: CredentialProviderFunction | Literal["auto"] | None,
-    source: str
-    | Path
-    | IO[str]
-    | IO[bytes]
-    | bytes
-    | list[str]
-    | list[Path]
-    | list[IO[str]]
-    | list[IO[bytes]]
-    | list[bytes],
+    source: Any,
     storage_options: dict[str, Any] | None,
     caller_name: str,
 ) -> CredentialProviderFunction | CredentialProvider | None:
@@ -237,6 +423,7 @@ def _maybe_init_credential_provider(
         _first_scan_path,
         _get_path_scheme,
         _is_aws_cloud,
+        _is_azure_cloud,
         _is_gcp_cloud,
     )
 
@@ -247,9 +434,6 @@ def _maybe_init_credential_provider(
     if credential_provider != "auto":
         return credential_provider
 
-    if storage_options is not None:
-        return None
-
     verbose = os.getenv("POLARS_VERBOSE") == "1"
 
     if (path := _first_scan_path(source)) is None:
@@ -258,16 +442,80 @@ def _maybe_init_credential_provider(
     if (scheme := _get_path_scheme(path)) is None:
         return None
 
-    provider = None
+    provider: (
+        CredentialProviderAWS | CredentialProviderAzure | CredentialProviderGCP | None
+    ) = None
 
     try:
-        provider = (
-            CredentialProviderAWS()
-            if _is_aws_cloud(scheme)
-            else CredentialProviderGCP()
-            if _is_gcp_cloud(scheme)
-            else None
-        )
+        # For Azure we dispatch to `azure.identity` as much as possible
+        if _is_azure_cloud(scheme):
+            tenant_id = None
+            storage_account = None
+
+            if storage_options is not None:
+                for k, v in storage_options.items():
+                    k = k.lower()
+
+                    # https://docs.rs/object_store/latest/object_store/azure/enum.AzureConfigKey.html
+                    if k in {
+                        "azure_storage_tenant_id",
+                        "azure_storage_authority_id",
+                        "azure_tenant_id",
+                        "azure_authority_id",
+                        "tenant_id",
+                        "authority_id",
+                    }:
+                        tenant_id = v
+                    elif k in {"azure_storage_account_name", "account_name"}:
+                        storage_account = v
+                    elif k in {"azure_use_azure_cli", "use_azure_cli"}:
+                        continue
+                    elif k in OBJECT_STORE_CLIENT_OPTIONS:
+                        pass
+                    else:
+                        # We assume some sort of access key was given, so we
+                        # just dispatch to the rust side.
+                        return None
+
+            storage_account = (
+                # Prefer the one embedded in the path
+                CredentialProviderAzure._extract_adls_uri_storage_account(str(path))
+                or storage_account
+            )
+
+            provider = CredentialProviderAzure(
+                tenant_id=tenant_id,
+                _verbose=verbose,
+                _storage_account=storage_account,
+            )
+        elif _is_aws_cloud(scheme):
+            region = None
+            default_region = None
+
+            if storage_options is not None:
+                for k, v in storage_options.items():
+                    k = k.lower()
+
+                    # https://docs.rs/object_store/latest/object_store/aws/enum.AmazonS3ConfigKey.html
+                    if k in {"aws_region", "region"}:
+                        region = v
+                    elif k in {"aws_default_region", "default_region"}:
+                        default_region = v
+                    elif k in OBJECT_STORE_CLIENT_OPTIONS:
+                        continue
+                    else:
+                        # We assume some sort of access key was given, so we
+                        # just dispatch to the rust side.
+                        return None
+
+            provider = CredentialProviderAWS(region_name=region or default_region)
+        elif storage_options is not None and any(
+            key.lower() not in OBJECT_STORE_CLIENT_OPTIONS for key in storage_options
+        ):
+            return None
+        elif _is_gcp_cloud(scheme):
+            provider = CredentialProviderGCP()
+
     except ImportError as e:
         if verbose:
             msg = f"Unable to auto-select credential provider: {e}"
@@ -278,3 +526,28 @@ def _maybe_init_credential_provider(
         print(msg, file=sys.stderr)
 
     return provider
+
+
+def _get_credentials_from_provider_expiry_aware(
+    credential_provider: CredentialProviderFunction,
+) -> dict[str, str]:
+    creds, opt_expiry = credential_provider()
+
+    if (
+        opt_expiry is not None
+        and (expires_in := opt_expiry - int(datetime.now().timestamp())) < 7
+    ):
+        import os
+        import sys
+        from time import sleep
+
+        if os.getenv("POLARS_VERBOSE") == "1":
+            print(
+                f"waiting for {expires_in} seconds for refreshed credentials",
+                file=sys.stderr,
+            )
+
+        sleep(1 + expires_in)
+        creds, _ = credential_provider()
+
+    return creds

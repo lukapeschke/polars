@@ -1,3 +1,4 @@
+use std::cmp;
 use std::fmt::Write;
 
 use num_traits::ToPrimitive;
@@ -111,7 +112,9 @@ where
                 } else {
                     idx_floor
                 };
-                count[idx as usize] += 1;
+                /* idx > (num_bins - 1) may happen due to floating point representation imprecision */
+                let idx = cmp::min(idx as usize, num_bins - 1);
+                count[idx] += 1;
             } else if include_lower && item == min_break {
                 count[0] += 1;
             }
@@ -256,7 +259,7 @@ pub fn hist_series(
         let bins = bins.cont_slice().unwrap();
         bins_arg = Some(bins);
     };
-    polars_ensure!(s.dtype().is_numeric(), InvalidOperation: "'hist' is only supported for numeric data");
+    polars_ensure!(s.dtype().is_primitive_numeric(), InvalidOperation: "'hist' is only supported for numeric data");
 
     let out = with_match_physical_numeric_polars_type!(s.dtype(), |$T| {
          let ca: &ChunkedArray<$T> = s.as_ref().as_ref().as_ref();

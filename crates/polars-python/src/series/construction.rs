@@ -1,10 +1,9 @@
 use std::borrow::Cow;
 
+use arrow::array::Array;
+use arrow::bitmap::BitmapBuilder;
+use arrow::types::NativeType;
 use numpy::{Element, PyArray1, PyArrayMethods};
-use polars::export::arrow;
-use polars::export::arrow::array::Array;
-use polars::export::arrow::bitmap::MutableBitmap;
-use polars::export::arrow::types::NativeType;
 use polars_core::prelude::*;
 use polars_core::utils::CustomIterTools;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -23,13 +22,8 @@ macro_rules! init_method {
         #[pymethods]
         impl PySeries {
             #[staticmethod]
-            fn $name(
-                py: Python,
-                name: &str,
-                array: &Bound<PyArray1<$type>>,
-                _strict: bool,
-            ) -> Self {
-                mmap_numpy_array(py, name, array)
+            fn $name(name: &str, array: &Bound<PyArray1<$type>>, _strict: bool) -> Self {
+                mmap_numpy_array(name, array)
             }
         }
     };
@@ -44,14 +38,10 @@ init_method!(new_u16, u16);
 init_method!(new_u32, u32);
 init_method!(new_u64, u64);
 
-fn mmap_numpy_array<T: Element + NativeType>(
-    py: Python,
-    name: &str,
-    array: &Bound<PyArray1<T>>,
-) -> PySeries {
+fn mmap_numpy_array<T: Element + NativeType>(name: &str, array: &Bound<PyArray1<T>>) -> PySeries {
     let vals = unsafe { array.as_slice().unwrap() };
 
-    let arr = unsafe { arrow::ffi::mmap::slice_and_owner(vals, array.to_object(py)) };
+    let arr = unsafe { arrow::ffi::mmap::slice_and_owner(vals, array.clone().unbind()) };
     Series::from_arrow(name.into(), arr.to_boxed())
         .unwrap()
         .into()
@@ -78,7 +68,7 @@ impl PySeries {
             });
             ca.with_name(name.into()).into_series().into()
         } else {
-            mmap_numpy_array(py, name, array)
+            mmap_numpy_array(name, array)
         }
     }
 
@@ -94,7 +84,7 @@ impl PySeries {
             });
             ca.with_name(name.into()).into_series().into()
         } else {
-            mmap_numpy_array(py, name, array)
+            mmap_numpy_array(name, array)
         }
     }
 }
@@ -106,7 +96,7 @@ impl PySeries {
         let len = values.len()?;
         let mut builder = BooleanChunkedBuilder::new(name.into(), len);
 
-        for res in values.iter()? {
+        for res in values.try_iter()? {
             let value = res?;
             if value.is_none() {
                 builder.append_null()
@@ -131,7 +121,7 @@ where
     let len = values.len()?;
     let mut builder = PrimitiveChunkedBuilder::<T>::new(name.into(), len);
 
-    for res in values.iter()? {
+    for res in values.try_iter()? {
         let value = res?;
         if value.is_none() {
             builder.append_null()
@@ -167,6 +157,7 @@ init_method_opt!(new_opt_i8, Int8Type, i8);
 init_method_opt!(new_opt_i16, Int16Type, i16);
 init_method_opt!(new_opt_i32, Int32Type, i32);
 init_method_opt!(new_opt_i64, Int64Type, i64);
+init_method_opt!(new_opt_i128, Int128Type, i64);
 init_method_opt!(new_opt_f32, Float32Type, f32);
 init_method_opt!(new_opt_f64, Float64Type, f64);
 
@@ -176,7 +167,7 @@ fn convert_to_avs<'a>(
     allow_object: bool,
 ) -> PyResult<Vec<AnyValue<'a>>> {
     values
-        .iter()?
+        .try_iter()?
         .map(|v| py_object_to_any_value(&(v?).as_borrowed(), strict, allow_object))
         .collect()
 }
@@ -186,7 +177,7 @@ impl PySeries {
     #[staticmethod]
     fn new_from_any_values(name: &str, values: &Bound<PyAny>, strict: bool) -> PyResult<Self> {
         let any_values_result = values
-            .iter()?
+            .try_iter()?
             .map(|v| py_object_to_any_value(&(v?).as_borrowed(), strict, true))
             .collect::<PyResult<Vec<AnyValue>>>();
         let result = any_values_result.and_then(|avs| {
@@ -202,13 +193,8 @@ impl PySeries {
         if !strict && result.is_err() {
             return Python::with_gil(|py| {
                 let objects = values
-                    .iter()?
-                    .map(|v| {
-                        let obj = ObjectValue {
-                            inner: v?.to_object(py),
-                        };
-                        Ok(obj)
-                    })
+                    .try_iter()?
+                    .map(|v| v?.extract())
                     .collect::<PyResult<Vec<ObjectValue>>>()?;
                 Ok(Self::new_object(py, name, objects, strict))
             });
@@ -239,7 +225,7 @@ impl PySeries {
         let len = values.len()?;
         let mut builder = StringChunkedBuilder::new(name.into(), len);
 
-        for res in values.iter()? {
+        for res in values.try_iter()? {
             let value = res?;
             if value.is_none() {
                 builder.append_null()
@@ -259,7 +245,7 @@ impl PySeries {
         let len = values.len()?;
         let mut builder = BinaryChunkedBuilder::new(name.into(), len);
 
-        for res in values.iter()? {
+        for res in values.try_iter()? {
             let value = res?;
             if value.is_none() {
                 builder.append_null()
@@ -307,7 +293,7 @@ impl PySeries {
     pub fn new_object(py: Python, name: &str, values: Vec<ObjectValue>, _strict: bool) -> Self {
         #[cfg(feature = "object")]
         {
-            let mut validity = MutableBitmap::with_capacity(values.len());
+            let mut validity = BitmapBuilder::with_capacity(values.len());
             values.iter().for_each(|v| {
                 let is_valid = !v.inner.is_none(py);
                 // SAFETY: we can ensure that validity has correct capacity.
@@ -317,7 +303,7 @@ impl PySeries {
             let ca = ObjectChunked::<ObjectValue>::new_from_vec_and_validity(
                 name.into(),
                 values,
-                validity.into(),
+                validity.into_opt_validity(),
             );
             let s = ca.into_series();
             s.into()
