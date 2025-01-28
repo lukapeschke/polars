@@ -221,15 +221,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atoi"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f28d99ec8bfea296261ca1af174f24225171fea9664ba9003cbebee704810528"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "atoi_simd"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2905,7 +2896,7 @@ dependencies = [
 
 [[package]]
 name = "polars"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "apache-avro",
@@ -2935,11 +2926,10 @@ dependencies = [
 
 [[package]]
 name = "polars-arrow"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "async-stream",
- "atoi",
  "atoi_simd",
  "avro-schema",
  "bytemuck",
@@ -2999,7 +2989,7 @@ dependencies = [
 
 [[package]]
 name = "polars-compute"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "atoi_simd",
  "bytemuck",
@@ -3019,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "polars-core"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "bincode",
@@ -3056,7 +3046,7 @@ dependencies = [
 
 [[package]]
 name = "polars-doc-examples"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
@@ -3070,7 +3060,7 @@ dependencies = [
 
 [[package]]
 name = "polars-dylib"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "polars",
  "polars-arrow",
@@ -3084,7 +3074,7 @@ dependencies = [
 
 [[package]]
 name = "polars-error"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "avro-schema",
  "object_store",
@@ -3096,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "polars-expr"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -3119,7 +3109,7 @@ dependencies = [
 
 [[package]]
 name = "polars-ffi"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "polars-arrow",
  "polars-core",
@@ -3127,7 +3117,7 @@ dependencies = [
 
 [[package]]
 name = "polars-io"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "async-trait",
@@ -3177,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "polars-json"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "chrono",
@@ -3198,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "polars-lazy"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -3227,7 +3217,7 @@ dependencies = [
 
 [[package]]
 name = "polars-mem-engine"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "futures",
  "memmap2",
@@ -3248,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "polars-ops"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -3287,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "polars-parquet"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "async-stream",
@@ -3328,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "polars-pipe"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-queue",
@@ -3354,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "polars-plan"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -3392,7 +3382,7 @@ dependencies = [
 
 [[package]]
 name = "polars-python"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "arboard",
@@ -3434,7 +3424,7 @@ dependencies = [
 
 [[package]]
 name = "polars-row"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -3446,7 +3436,7 @@ dependencies = [
 
 [[package]]
 name = "polars-schema"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "indexmap",
  "polars-error",
@@ -3457,7 +3447,7 @@ dependencies = [
 
 [[package]]
 name = "polars-sql"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "hex",
  "polars-core",
@@ -3475,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "polars-stream"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "atomic-waker",
  "crossbeam-deque",
@@ -3503,9 +3493,9 @@ dependencies = [
 
 [[package]]
 name = "polars-time"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
- "atoi",
+ "atoi_simd",
  "bytemuck",
  "chrono",
  "chrono-tz",
@@ -3526,7 +3516,7 @@ dependencies = [
 
 [[package]]
 name = "polars-utils"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "ahash",
  "bincode",
@@ -3641,7 +3631,7 @@ dependencies = [
 
 [[package]]
 name = "py-polars"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "jemallocator",
  "libc",

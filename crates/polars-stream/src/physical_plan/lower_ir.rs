@@ -262,14 +262,27 @@ pub fn lower_ir(
             },
         },
 
-        IR::MapFunction { input, function } => {
-            // MergeSorted uses a rechunk hack incompatible with the
-            // streaming engine.
-            #[cfg(feature = "merge_sorted")]
-            if let FunctionIR::MergeSorted { .. } = function {
-                todo!()
-            }
+        #[cfg(feature = "merge_sorted")]
+        IR::MergeSorted {
+            input_left,
+            input_right,
+            key,
+        } => {
+            let input_left = *input_left;
+            let input_right = *input_right;
+            let key = key.clone();
 
+            let phys_left = lower_ir!(input_left)?;
+            let phys_right = lower_ir!(input_right)?;
+
+            PhysNodeKind::MergeSorted {
+                input_left: phys_left,
+                input_right: phys_right,
+                key,
+            }
+        },
+
+        IR::MapFunction { input, function } => {
             let function = function.clone();
             let phys_input = lower_ir!(*input)?;
 
@@ -396,9 +409,7 @@ pub fn lower_ir(
                 #[cfg(feature = "ipc")]
                 if matches!(scan_type, FileScan::Ipc { .. }) {
                     // @TODO: All the things the IPC source does not support yet.
-                    if scan_sources.is_cloud_url()
-                        || file_options.slice.is_some_and(|(offset, _)| offset < 0)
-                    {
+                    if scan_sources.is_cloud_url() {
                         todo!();
                     }
                 }
